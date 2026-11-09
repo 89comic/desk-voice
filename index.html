@@ -50,6 +50,8 @@ const $=id=>document.getElementById(id);
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
 const ANDROID=/Android/i.test(navigator.userAgent);
 let peer=null, peerOrigin="", rec=null, want=false, done=[], cur=[], startedAt=0, quick=0, lang="ko-KR", leaving="", readyT=0, alone=!window.opener;
+let auto=false, autoTry=false, copyAfter=false, lastText="", waitT=0;
+const SETTLE=1500, IDLE=20000;   /* 글자가 멈추고 끝내기까지, 말이 없을 때 마이크를 닫기까지 */
 
 function setS(s,text){ document.body.dataset.s=s; $("st").textContent=text; }
 function show(){ $("txt").textContent=done.concat(cur).join(""); const t=$("txt"); t.scrollTop=t.scrollHeight; }
@@ -71,8 +73,19 @@ function pick(results){
   return out;
 }
 const SAY={"not-allowed":"마이크가 허용되지 않았어요. 주소창의 자물쇠를 눌러 마이크를 허용한 뒤 다시 시도해 주세요.","service-not-allowed":"이 브라우저에서 음성 인식이 막혀 있어요. Chrome에서 열어 주세요.","audio-capture":"마이크를 찾지 못했어요. 마이크 연결을 확인해 주세요.","network":"인터넷 연결이 끊겨 음성 인식을 하지 못했어요."};
+function arm(ms){ clearTimeout(waitT); if(auto&&want) waitT=setTimeout(settled,ms); }
+function settled(){
+  if(!alone){ leave("done"); return; }
+  copyAfter=!!$("txt").textContent.trim(); hush();
+}
+async function copyText(){
+  let ok=false;
+  try{ ok=await Promise.race([navigator.clipboard.writeText($("txt").textContent.trim()).then(()=>true), new Promise(f=>setTimeout(()=>f(false),1500))]); }catch(err){}
+  $("hint").textContent=ok?"복사했어요. 이 창을 닫고 Desk 입력창에 붙여 넣어 주세요.":"복사하지 못했어요. 복사 버튼을 누르거나 글자를 길게 눌러 복사해 주세요.";
+}
 function failed(code){
-  want=false;
+  want=false; clearTimeout(waitT);
+  if(autoTry&&code==="not-allowed"){ autoTry=false; $("again").hidden=false; return; }   /* 저절로 시작을 브라우저가 막으면 버튼으로 시작한다 */
   setS("err","듣지 못했어요");
   $("hint").textContent=SAY[code]||("음성 인식 오류: "+code);
   $("again").hidden=false; $("done").textContent="닫기"; $("send").hidden=true;
@@ -83,7 +96,7 @@ function begin(){
   let r;
   try{ r=new SR(); }catch(e){ failed("start"); return; }
   r.lang=lang; r.continuous=true; r.interimResults=true;
-  r.onresult=e=>{ cur=pick(e.results); show(); post({t:"r",parts:done.concat(cur)}); };
+  r.onresult=e=>{ cur=pick(e.results); show(); post({t:"r",parts:done.concat(cur)}); const t=done.concat(cur).join("").trim(); if(t!==lastText){ lastText=t; arm(SETTLE); } };
   r.onerror=e=>{ if(e.error==="no-speech"||e.error==="aborted") return; failed(e.error); };
   r.onend=()=>{
     rec=null;
@@ -97,11 +110,11 @@ function begin(){
   try{ r.start(); }catch(e){ rec=null; failed("start"); return; }
   setS("listen","듣고 있어요");
 }
-function listen(){ if(want) return; want=true; quick=0; $("again").hidden=true; $("hint").textContent=alone?"Desk와 연결되지 않아 글자를 복사해서 붙여 넣어야 해요.":"멈춰도 끊기지 않아요."; if(!alone){ $("done").textContent="입력창에 넣기"; $("send").hidden=false; } begin(); }
-function hush(){ want=false; if(rec) try{ rec.stop(); }catch(e){ rec=null; ended(); } else ended(); }
+function listen(){ if(want) return; want=true; quick=0; lastText=""; $("again").hidden=true; $("hint").textContent=alone?"Desk와 연결되지 않아 글자를 복사해서 붙여 넣어야 해요.":auto?"말을 멈추면 바로 입력돼요.":"멈춰도 끊기지 않아요."; if(!alone){ $("done").textContent="입력창에 넣기"; $("send").hidden=false; } arm(IDLE); begin(); }
+function hush(){ want=false; clearTimeout(waitT); if(rec) try{ rec.stop(); }catch(e){ rec=null; ended(); } else ended(); }
 function ended(){
   if(document.body.dataset.s!=="err") setS("wait",alone?"멈췄어요":"기다리는 중");
-  if(alone) return;
+  if(alone){ $("again").hidden=false; if(copyAfter){ copyAfter=false; copyText(); } return; }
   if(leaving==="send") post({t:"send"});
   post({t:"end"});
   if(leaving) setTimeout(()=>window.close(),120);
@@ -115,13 +128,13 @@ window.addEventListener("message",async e=>{
   if(e.source!==window.opener||!e.data||!e.data.t) return;
   if(!peer){ if(!await okOrigin(e.origin)) return; peer=e.source; peerOrigin=e.origin; clearInterval(readyT); }
   else if(e.origin!==peerOrigin) return;
-  if(e.data.t==="start"){ lang=e.data.lang||lang; done=[]; cur=[]; show(); leaving=""; if(document.body.dataset.s==="err"){ setS("wait","기다리는 중"); } listen(); }
+  if(e.data.t==="start"){ lang=e.data.lang||lang; auto=!!e.data.auto; done=[]; cur=[]; show(); leaving=""; if(document.body.dataset.s==="err"){ setS("wait","기다리는 중"); } listen(); }
   else if(e.data.t==="stop") hush();
 });
 $("done").onclick=()=>leave("done");
 $("send").onclick=()=>leave("send");
-$("again").onclick=()=>listen();
-$("copy").onclick=async()=>{ try{ await navigator.clipboard.writeText($("txt").textContent.trim()); $("hint").textContent="복사했어요. Desk 입력창에 붙여 넣어 주세요."; }catch(err){ $("hint").textContent="복사하지 못했어요. 글자를 길게 눌러 복사해 주세요."; } };
+$("again").onclick=()=>{ autoTry=false; listen(); };
+$("copy").onclick=copyText;
 document.addEventListener("keydown",e=>{ if(alone) return; if(e.key==="Enter"&&!e.isComposing){ e.preventDefault(); leave("send"); } else if(e.key==="Escape") leave("done"); });
 window.addEventListener("pagehide",()=>post({t:"end"}));
 
@@ -130,6 +143,7 @@ function goAlone(){
   $("done").textContent="닫기"; $("send").hidden=true; $("copy").hidden=false; $("again").hidden=false; $("again").textContent="듣기";
   setS("wait","눌러서 시작하세요");
   $("hint").textContent="Desk와 연결되지 않아 글자를 복사해서 붙여 넣어야 해요.";
+  auto=true; autoTry=true; listen();
 }
 if(alone) goAlone();
 else{
